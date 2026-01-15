@@ -1,19 +1,62 @@
 # ==========================================
 # Sales Performance DSS
-# Streamlit + Plotly (Power BI Style)
+# Streamlit + Plotly
+# Login + Correct Role-Based Access
 # ==========================================
 
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import numpy as np
+
+st.set_page_config(page_title="Sales DSS", layout="wide")
 
 # ------------------------------------------
-# PAGE CONFIG
+# MOCK USER DATABASE
+# (Usernames MUST match names in dataset)
 # ------------------------------------------
-st.set_page_config(
-    page_title="Sales Performance DSS",
-    layout="wide"
-)
+USERS = {
+    "John": {"password": "john123", "role": "Salesperson"},
+    "Amit": {"password": "amit123", "role": "Salesperson"},
+    "Eric": {"password": "eric123", "role": "Supervisor"},     # RegionManager
+    "Sophie": {"password": "sophie123", "role": "Supervisor"},
+    "Ryan": {"password": "ryan123", "role": "Supervisor"},
+    "Wendy": {"password": "wendy123", "role": "Supervisor"},
+    "Manager": {"password": "manager123", "role": "Manager"},
+    "Admin": {"password": "admin123", "role": "Admin"}
+}
+
+# ------------------------------------------
+# SESSION STATE INIT
+# ------------------------------------------
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+    st.session_state.role = None
+    st.session_state.user = None
+
+# ------------------------------------------
+# LOGIN PAGE
+# ------------------------------------------
+def login_page():
+    st.title("🔐 Login – Sales Performance DSS")
+
+    left, center, right = st.columns([2, 1, 2])
+
+    with center:
+        st.markdown("### Please login to continue")
+
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+
+        if st.button("Login", use_container_width=True):
+            if username in USERS and USERS[username]["password"] == password:
+                st.session_state.logged_in = True
+                st.session_state.user = username
+                st.session_state.role = USERS[username]["role"]
+                st.success(f"Welcome {username} ({st.session_state.role})")
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password")
 
 # ------------------------------------------
 # LOAD DATA
@@ -24,126 +67,129 @@ def load_data():
     df.columns = df.columns.str.lower().str.replace(" ", "_")
     df = df.dropna().drop_duplicates()
 
-    # Derived fields
+    # Core business fields
     df["sales"] = df["quantity"] * df["unitprice"]
     df["date"] = pd.to_datetime(df["date"])
     df["month"] = df["date"].dt.to_period("M").astype(str)
-    df["salesperson"] = df["regionmanager"]
 
-    # Target (synthetic)
+    # IMPORTANT: keep both roles separate
+    # salesperson column must exist in your dataset
+    # regionmanager column exists as confirmed
+    df["salesperson"] = df["salesperson"]
+    df["region_manager"] = df["regionmanager"]
+
+    # Synthetic target (acceptable for DSS demo)
     df["target"] = df["sales"] * 1.10
     df["target_achievement_pct"] = (df["sales"] / df["target"]) * 100
 
     return df
 
-df = load_data()
-
 # ------------------------------------------
-# SIDEBAR FILTERS (POWER BI STYLE)
+# DASHBOARD PAGE
 # ------------------------------------------
-st.sidebar.title("🔎 Filters")
+def dashboard():
+    df = load_data()
+    role = st.session_state.role
+    current_user = st.session_state.user
 
-role = st.sidebar.selectbox(
-    "User Role",
-    ["Salesperson", "Supervisor", "Manager", "Admin"]
-)
+    st.title("📊 Sales Performance Decision Support System")
 
-regions = st.sidebar.multiselect(
-    "Region",
-    options=df["region"].unique(),
-    default=df["region"].unique()
-)
+    # Logout
+    if st.button("🚪 Logout"):
+        st.session_state.logged_in = False
+        st.session_state.role = None
+        st.session_state.user = None
+        st.rerun()
 
-products = st.sidebar.multiselect(
-    "Product",
-    options=df["product"].unique(),
-    default=df["product"].unique()
-)
+    # --------------------------------------
+    # TOP FILTERS
+    # --------------------------------------
+    c1, c2, c3 = st.columns(3)
 
-date_range = st.sidebar.date_input(
-    "Date Range",
-    [df["date"].min(), df["date"].max()]
-)
+    with c1:
+        region = st.selectbox("Region", ["All"] + sorted(df["region"].unique()))
+    with c2:
+        product = st.selectbox("Product", ["All"] + sorted(df["product"].unique()))
+    with c3:
+        date_range = st.date_input(
+            "Date Range",
+            [df["date"].min(), df["date"].max()]
+        )
 
-# ------------------------------------------
-# FILTER DATA
-# ------------------------------------------
-filtered_df = df[
-    (df["region"].isin(regions)) &
-    (df["product"].isin(products)) &
-    (df["date"] >= pd.to_datetime(date_range[0])) &
-    (df["date"] <= pd.to_datetime(date_range[1]))
-]
+    filtered = df.copy()
 
-# Role-based filtering
-if role == "Salesperson":
-    filtered_df = filtered_df[
-        filtered_df["salesperson"] == filtered_df["salesperson"].iloc[0]
+    if region != "All":
+        filtered = filtered[filtered["region"] == region]
+    if product != "All":
+        filtered = filtered[filtered["product"] == product]
+
+    filtered = filtered[
+        (filtered["date"] >= pd.to_datetime(date_range[0])) &
+        (filtered["date"] <= pd.to_datetime(date_range[1]))
     ]
 
-elif role == "Supervisor":
-    filtered_df = filtered_df[
-        filtered_df["region"] == filtered_df["region"].iloc[0]
-    ]
+    # --------------------------------------
+    # ✅ CORRECT ROLE-BASED ACCESS CONTROL
+    # --------------------------------------
+    if role == "Salesperson":
+        # Only own sales
+        filtered = filtered[filtered["salesperson"] == current_user]
+
+    elif role == "Supervisor":
+        # All regions managed by this region manager
+        managed_regions = df[
+            df["region_manager"] == current_user
+        ]["region"].unique()
+        filtered = filtered[filtered["region"].isin(managed_regions)]
+
+    # Manager & Admin see all data
+
+    # --------------------------------------
+    # KPI CARDS
+    # --------------------------------------
+    avg_target = filtered["target_achievement_pct"].mean()
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Total Sales", f"{filtered['sales'].sum():,.0f}")
+    k2.metric("Avg Target %", f"{avg_target:.2f}%")
+    k3.metric("Role", role)
+
+    # --------------------------------------
+    # CHARTS
+    # --------------------------------------
+    c4, c5 = st.columns(2)
+
+    with c4:
+        fig1 = px.bar(
+            filtered.groupby("region", as_index=False)["sales"].sum(),
+            x="region",
+            y="sales",
+            title="Sales by Region",
+            template="plotly_dark"
+        )
+        st.plotly_chart(fig1, use_container_width=True)
+
+    with c5:
+        fig2 = px.line(
+            filtered.groupby("month", as_index=False)["sales"].sum(),
+            x="month",
+            y="sales",
+            title="Sales Trend",
+            template="plotly_dark"
+        )
+        st.plotly_chart(fig2, use_container_width=True)
+
+    # --------------------------------------
+    # ADMIN ONLY: FULL DATA ACCESS
+    # --------------------------------------
+    if role == "Admin":
+        st.subheader("📋 Full Data Access")
+        st.dataframe(filtered, use_container_width=True)
 
 # ------------------------------------------
-# KPI CARDS
+# MAIN CONTROLLER
 # ------------------------------------------
-st.title("📊 Sales Performance Decision Support System")
-
-kpi1, kpi2, kpi3 = st.columns(3)
-
-kpi1.metric(
-    "Total Sales",
-    f"{filtered_df['sales'].sum():,.0f}"
-)
-
-kpi2.metric(
-    "Total Target",
-    f"{filtered_df['target'].sum():,.0f}"
-)
-
-kpi3.metric(
-    "Avg Target Achievement %",
-    f"{filtered_df['target_achievement_pct'].mean():.2f}%"
-)
-
-# ------------------------------------------
-# CHARTS
-# ------------------------------------------
-col1, col2 = st.columns(2)
-
-with col1:
-    fig_region = px.bar(
-        filtered_df.groupby("region", as_index=False)["sales"].sum(),
-        x="region",
-        y="sales",
-        title="Sales by Region"
-    )
-    st.plotly_chart(fig_region, use_container_width=True)
-
-with col2:
-    fig_trend = px.line(
-        filtered_df.groupby("month", as_index=False)["sales"].sum(),
-        x="month",
-        y="sales",
-        title="Sales Trend"
-    )
-    st.plotly_chart(fig_trend, use_container_width=True)
-
-fig_product = px.bar(
-    filtered_df.groupby("product", as_index=False)["sales"].sum(),
-    x="product",
-    y="sales",
-    title="Sales by Product"
-)
-
-st.plotly_chart(fig_product, use_container_width=True)
-
-# ------------------------------------------
-# ADMIN DATA VIEW
-# ------------------------------------------
-if role == "Admin":
-    st.subheader("📋 Detailed Data View")
-    st.dataframe(filtered_df)
-
+if not st.session_state.logged_in:
+    login_page()
+else:
+    dashboard()
